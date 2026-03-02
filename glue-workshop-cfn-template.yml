@@ -1,0 +1,415 @@
+Description: CloudFormation template to create AWS Glue workshop resources
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Database Configuration
+        Parameters:
+          - WorkshopDBName
+          - DBMasterUser
+          - DBMasterPassword
+      - Label:
+          default: Misc Configuration
+        Parameters:
+          - LatestAmiId
+    ParameterLabels:
+      WorkshopDBName:
+        default: Database Name
+      DBMasterUser:
+        default: Master Username
+      DBMasterPassword:
+        default: Master User Password
+      LatestAmiId:
+        default: Latest AMI Id
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    PublicOne:
+      CIDR: 10.0.0.0/24
+    PublicTwo:
+      CIDR: 10.0.1.0/24
+    Private:
+      CIDR: 10.0.2.0/24
+Parameters:
+  WorkshopDBName:
+    Type: String
+    Default: gluestudio
+    AllowedValues:
+      - gluestudio
+    Description: Name of the database that will be created.
+  DBMasterUser:
+    Type: String
+    Default: dbadmin
+    Description: Master username for WorkshopDB database.
+  DBMasterPassword:
+    Type: String
+    Default: GlueData22!
+    Description: Master password for WorkshopDB database.
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    AllowedValues:
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: Image ID for the EC2 helper instance. DO NOT change this.
+Resources:
+  # 1. Resources for RDS database SecurityGroup, DBSubnetGroup, Self Ingress Rule and MySQL db
+  RDSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security Group for RDS
+      VpcId: !Ref GlueWorkshopVPC
+      Tags:
+        - Key: Name
+          Value: Workshop-RDS-SecGroup
+  SelfIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn: RDSSecurityGroup
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref RDSSecurityGroup
+  RDSSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: RDS Subnet Group using subnets from 2 AZs
+      SubnetIds:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      Tags:
+        - Key: Name
+          Value: Workshop-RDS-SubnetGroup
+  WorkshopDatabaseCluster:
+    Type: 'AWS::RDS::DBCluster'
+    DependsOn:
+      - RDSSubnetGroup
+      - RDSSecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: workshop-database
+      DatabaseName: !Ref WorkshopDBName
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      Engine: aurora-mysql
+      EngineMode: provisioned
+      EngineVersion: 5.7.mysql_aurora.2.11.1
+      MasterUsername: !Ref DBMasterUser
+      MasterUserPassword: !Ref DBMasterPassword
+      VpcSecurityGroupIds:
+        - !Ref RDSSecurityGroup
+  
+  WorkshopDatabasePrimaryInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref WorkshopDatabaseCluster
+      DBInstanceClass: db.r5.large
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      PubliclyAccessible: true
+
+
+  # 2. Resources for VPC Creation, Private Subnet, 2 Public Subnet, InternetGateway, Nat Gateway, Gateway Attachment, Route Table and Association
+  GlueWorkshopVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - VPC
+        - CIDR
+      InstanceTenancy: default
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: Workshop-VPC
+  PrivateSubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - Private
+        - CIDR
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      VpcId: !Ref GlueWorkshopVPC
+      Tags:
+        - Key: Name
+          Value: Workshop-PrivateSubnet
+  PublicSubnetOne:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - PublicOne
+        - CIDR
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      VpcId: !Ref GlueWorkshopVPC
+      Tags:
+        - Key: Name
+          Value: Workshop-PublicSubnetOne
+  PublicSubnetTwo:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - PublicTwo
+        - CIDR
+      MapPublicIpOnLaunch: 'true'
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      VpcId: !Ref GlueWorkshopVPC
+      Tags:
+        - Key: Name
+          Value: Workshop-PublicSubnetTwo
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Workshop-IG
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref GlueWorkshopVPC
+      InternetGatewayId: !Ref InternetGateway
+  InternetGatewayRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref GlueWorkshopVPC
+  InternetGatewayRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref InternetGatewayRouteTable
+      GatewayId: !Ref InternetGateway
+  PublicSubnetOneRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref InternetGatewayRouteTable
+      SubnetId: !Ref PublicSubnetOne
+  PublicSubnetTwoRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref InternetGatewayRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+  NATGatewayAttachment:
+    Type: 'AWS::EC2::EIP'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+  NATGateway:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      AllocationId: !GetAtt 
+        - NATGatewayAttachment
+        - AllocationId
+      Tags:
+        - Key: Name
+          Value: NAT-Gateway
+  NATGatewayRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref GlueWorkshopVPC
+      Tags:
+        - Key: Name
+          Value: NAT-RouteTable
+  NATGatewayRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref NATGatewayRouteTable
+      NatGatewayId: !Ref NATGateway
+  PrivateSubnetRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref NATGatewayRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  # 3. Resources for access to S3 via. VPCEndpoint for storing logs
+  S3Endpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: '*'
+            Principal: '*'
+            Resource: '*'
+      RouteTableIds:
+        - !Ref NATGatewayRouteTable
+        - !Ref InternetGatewayRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref GlueWorkshopVPC
+
+  # 4. Resources for Glue Connector for RDS with Glue ServiceRole
+  WorkshopGlueConnector:
+    Type: 'AWS::Glue::Connection'
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      ConnectionInput:
+        Name: WorkshopGlueConnector
+        ConnectionType: JDBC
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select 
+            - 0
+            - !GetAZs 
+              Ref: 'AWS::Region'
+          SecurityGroupIdList:
+            - !Ref RDSSecurityGroup
+          SubnetId: !Ref PublicSubnetOne
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Join 
+            - ''
+            - - 'jdbc:mysql://'
+              - !GetAtt 
+                - WorkshopDatabasePrimaryInstance
+                - Endpoint.Address
+              - ':3306/gluestudio'
+          USERNAME: !Ref DBMasterUser
+          PASSWORD: !Ref DBMasterPassword
+          JDBC_ENFORCE_SSL: 'false'
+  GlueServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      Policies:
+        - PolicyName: Glue-Workshop-Bucket-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref   TargetBucket
+                      - /*
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref   TargetBucket
+      RoleName: Workshop-GlueServiceRole
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      RoleName: EC2Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+  
+  GlueEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref GlueWorkshopVPC
+      SubnetIds:
+        - !Ref PublicSubnetOne
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.glue
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref RDSSecurityGroup
+      PrivateDnsEnabled: true
+      PolicyDocument: {"Statement": [{"Action": "*","Effect": "Allow","Principal": "*","Resource": "*"}]}
+
+  # 5. S3 Bucket Target Bucket
+  TargetBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'glue-workshop-${AWS::Region}-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      VersioningConfiguration:
+        Status:
+          Suspended
+
+  # 6. Resources to create RDS database with Tables
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+  BackUpRestoreInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: t2.small
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref RDSSecurityGroup
+          SubnetId: !Ref PublicSubnetOne
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -ex
+            - |
+              sudo yum -y install mysql
+            - >
+              aws s3 cp
+              s3://aws-data-analytics-workshops/aws_glue/workshop2022/sourcedb/sourcedb.sql
+              /tmp/
+            - 'mysql -h '
+            - !GetAtt 
+              - WorkshopDatabasePrimaryInstance
+              - Endpoint.Address
+            - ' -u '
+            - !Ref DBMasterUser
+            - ' -p'''
+            - !Ref DBMasterPassword
+            - ''' '
+            - !Ref WorkshopDBName
+            - ' < /tmp/sourcedb.sql'
+            - |+
+      Tags:
+        - Key: Name
+          Value: EC2-DB-Loader
+    DependsOn:
+      - WorkshopDatabasePrimaryInstance
+
+
+Outputs:
+  DBMasterPassword:
+    Description: Master password for Workshop database
+    Value: !Ref DBMasterPassword
+  DBMasterUser:
+    Description: Master User for Workshop database
+    Value: !Ref DBMasterUser
+  TargetBucketDetails:
+    Value:
+      !Ref   TargetBucket
